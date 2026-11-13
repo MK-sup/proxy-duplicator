@@ -115,12 +115,23 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 ```
+### Команды в linux как это на сервере сделать
+sudo micro /opt/dup/server.yaml
+sudo micro /etc/systemd/system/proxy-duplicator.service
+sudo systemctl enable proxy-duplicator
+sudo systemctl restart proxy-duplicator
+sudo systemctl status proxy-duplicator
 
 ### Клиент (Windows/Linux)
 
 ```bash
 dup client -c client.yaml      # Windows: dup.exe client -c client.yaml
 ```
+
+**Без `-c`** конфиг ищется рядом с бинарником (`client.yaml` / `server.yaml`),
+затем в текущей директории. Запуск **без подкоманды** (двойной клик по
+`dup.exe`) сам подхватывает `client.yaml` (приоритет), иначе `server.yaml`;
+если конфигов нет — печатает подсказку и ждёт Enter, чтобы окно не закрылось.
 
 Пример — `configs/client.example.yaml`. Ключевые поля:
 
