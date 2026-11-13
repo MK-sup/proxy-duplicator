@@ -25,14 +25,19 @@ func (k Kind) String() string {
 	return "tcp"
 }
 
-// Hooks receive session lifecycle events. OnInbound is called from inside the
-// reorder push (strict seq order); it may block — it runs on a tunnel reader
-// goroutine, so implementations should hand off to their own queues. OnClose
-// fires exactly once (GC, peer CLOSE, abort, idle timeout).
+// Hooks receive session lifecycle events. OnInbound is called from the
+// session's delivery goroutine in strict seq order; it may block — that only
+// stalls this session's delivery, never a tunnel reader. OnClose fires exactly
+// once (GC, peer CLOSE, abort, idle timeout).
 type Hooks struct {
 	OnClose   func(reason string)
 	OnInbound func(f *protocol.Frame)
 }
+
+// inboundQueue is the per-session buffer between tunnel readers and the
+// delivery goroutine. Sized so a transient consumer stall is absorbed;
+// a sustained stall destroys the session instead of freezing both readers.
+const inboundQueue = 512
 
 // Session is one multiplexed flow (a SOCKS5 CONNECT pipe or a UDP binding).
 // Owner carries side-specific state (local conn, upstream conn, socket, ...).
@@ -42,11 +47,12 @@ type Session struct {
 	Target string
 	Owner  any
 
-	table    *Table
-	hooks    Hooks
-	in       *Reorder
-	pushMu   sync.Mutex // serializes inbound delivery from both tunnel readers
-	nextSeq  atomic.Uint32
+	table   *Table
+	hooks   Hooks
+	in      *Reorder
+	inbox   chan *protocol.Frame // readers → delivery goroutine (never blocks readers)
+	done    chan struct{}        // closed exactly once in Close
+	nextSeq atomic.Uint32
 	activeAt atomic.Int64 // unix nano of last activity in either direction
 	closed   atomic.Bool
 
@@ -70,6 +76,7 @@ func (s *Session) Closed() bool { return s.closed.Load() }
 func (s *Session) Close(reason string) {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
+		close(s.done)
 		if s.hooks.OnClose != nil {
 			s.hooks.OnClose(reason)
 		}
@@ -80,18 +87,47 @@ func (s *Session) Close(reason string) {
 // session on this side.
 func (s *Session) Inbound() *Reorder { return s.in }
 
-// HandleInbound dedups/reorders one incoming sequenced frame and delivers it
-// in order to Hooks.OnInbound. Safe to call concurrently from multiple tunnel
-// readers (serialized per session).
+// HandleInbound queues one incoming sequenced frame for async in-order
+// delivery. Safe to call concurrently from multiple tunnel readers; it never
+// blocks on the consumer (relay.Enqueue), so a stalled local consumer cannot
+// freeze tunnel readers or starve PONG processing. If the inbox is full the
+// session is destroyed — one wedged flow must not take down the tunnels.
 func (s *Session) HandleInbound(f *protocol.Frame) {
+	if s.closed.Load() {
+		return
+	}
 	s.Touch()
-	s.pushMu.Lock()
-	defer s.pushMu.Unlock()
-	s.in.Push(f, time.Now(), func(fr *protocol.Frame) {
-		if s.hooks.OnInbound != nil {
-			s.hooks.OnInbound(fr)
+	select {
+	case s.inbox <- f:
+	case <-s.done:
+	default:
+		// Inbox full: consumer stalled beyond the buffer. Destroy (idempotent)
+		// rather than block the tunnel reader — blocked readers stop processing
+		// PONGs and cause false "ping timeout" evictions of whole tunnels.
+		if s.table != nil {
+			s.table.Destroy(s.ID, "inbound queue overflow (consumer stalled)")
+		} else {
+			s.Close("inbound queue overflow (consumer stalled)")
 		}
-	})
+	}
+}
+
+// deliverLoop drains the inbox on a dedicated goroutine so blocking
+// OnInbound implementations (relay.Enqueue backpressure) never stall the
+// tunnel readers that must keep answering PINGs.
+func (s *Session) deliverLoop() {
+	for {
+		select {
+		case f := <-s.inbox:
+			s.in.Push(f, time.Now(), func(fr *protocol.Frame) {
+				if s.hooks.OnInbound != nil {
+					s.hooks.OnInbound(fr)
+				}
+			})
+		case <-s.done:
+			return
+		}
+	}
 }
 
 // Options configures a Table.
@@ -206,6 +242,8 @@ func (t *Table) newSession(id uint32, kind Kind, target string, owner any, hooks
 		Owner:  owner,
 		table:  t,
 		hooks:  hooks,
+		inbox:  make(chan *protocol.Frame, inboundQueue),
+		done:   make(chan struct{}),
 	}
 	s.activeAt.Store(now.UnixNano())
 	var skipCB func(uint32, uint32)
@@ -214,6 +252,7 @@ func (t *Table) newSession(id uint32, kind Kind, target string, owner any, hooks
 		skipCB = func(from, to uint32) { t.opts.OnSkip(sid, from, to) }
 	}
 	s.in = NewReorder(now, t.opts.ReorderMaxFrames, t.opts.ReorderMaxBytes, t.opts.GapSkipTimeout, skipCB)
+	go s.deliverLoop()
 	return s
 }
 
