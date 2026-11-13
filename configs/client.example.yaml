@@ -1,0 +1,70 @@
+# Example configuration for the client side (dupc).
+#
+# Run:  dup client -c client.yaml
+#
+# Point Nekoray's SOCKS5 outbound at socks5_listen.
+mode: client
+
+# Number of parallel tunnels (duplication across all of them).
+# 1 = no duplication, 2 = default, 4/8 = more redundancy (2x/4x/8x traffic).
+tunnels: 2
+
+transport: ssh        # ssh | plain (plain = no SSH, direct TCP; for tests)
+
+ssh:
+  # Use either `address` (all tunnels to it) or `addresses`
+  # (tunnel i dials addresses[i % len] — useful when the same sshd is
+  # reachable via several IPs/ports for route diversity).
+  address: "203.0.113.10:22"
+  #addresses:
+  #  - "203.0.113.10:22"
+  #  - "203.0.113.10:2222"
+  user: dup
+  password: ""                  # optional (if key_file is empty, required)
+  key_file: "~/.ssh/id_ed25519" # optional
+  key_passphrase: ""            # optional
+  host_key: ""                  # pinned host key line (recommended! see README)
+  forward_port: 9000            # server-side dupd `listen` port (direct-tcpip target)
+  connect_timeout: 10s
+  keepalive_interval: 15s
+
+# Used only when transport: plain (test harness / no SSH).
+plain:
+  address: "127.0.0.1:9000"
+  #addresses:                   # same round-robin semantics as ssh.addresses
+  #  - "127.0.0.1:9000"
+  #  - "127.0.0.1:9001"
+
+# Local SOCKS5 for Nekoray.
+socks5_listen: "127.0.0.1:1080"
+# Local UDP relay for SOCKS5 UDP ASSOCIATE (0 = ephemeral port).
+udp_relay: "127.0.0.1:0"
+
+queue:
+  frames: 512             # per-tunnel bounded queue
+
+ping_interval: 5s
+ping_timeout: 15s
+
+reconnect:
+  initial: 1s
+  max: 30s
+
+# When zero tunnels are Up for this long, local sessions are closed.
+both_dead_close_after: 10s
+
+log:
+  level: info
+  format: text
+  file: ""
+
+limits:
+  max_sessions: 8192
+  max_frame_payload: 32768
+  reorder_max_frames: 1024
+  reorder_max_bytes: 4194304
+  gap_skip_timeout: 3s
+  session_idle_tcp: 120s
+  udp_idle: 60s
+
+relay_close_grace: 30s

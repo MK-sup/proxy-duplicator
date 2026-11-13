@@ -1,0 +1,32 @@
+# Example configuration for the server side (dupd).
+#
+# Run:  dup server -c server.yaml
+#
+# Requirements:
+#   - serjs/go-socks5-proxy listening on socks5_upstream (127.0.0.1:1080)
+#   - sshd running (the client dials it and forwards direct-tcpip to `listen`)
+mode: server
+
+# Tunnel-facing framed listener. Must be reachable only through SSH:
+# the client opens direct-tcpip channels to 127.0.0.1:<port> via sshd.
+listen: "127.0.0.1:9000"
+
+# Local serjs/go-socks5-proxy for TCP egress (UDP bypasses it).
+socks5_upstream: "127.0.0.1:1080"
+socks5_dial_timeout: 10s
+
+log:
+  level: info        # debug | info | warn | error
+  format: text       # text | json
+  file: ""           # "" = stdout; otherwise append to this path
+
+limits:
+  max_sessions: 8192
+  max_frame_payload: 32768
+  reorder_max_frames: 1024    # per session-direction
+  reorder_max_bytes: 4194304
+  gap_skip_timeout: 3s
+  session_idle_tcp: 120s
+  udp_idle: 60s
+
+relay_close_grace: 30s
