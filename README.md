@@ -26,12 +26,32 @@ Apps → Nekoray (SOCKS5) → dupc → N× SSH (direct-tcpip) → dupd → serjs
   закрывает локальные соединения (Nekoray видит reset и ретраит).
 * Здоровье каждого туннеля — приложение-level PING/PONG (5 с / 15 с), он же
   ловит «зависшую» очередь, которую не видит SSH keepalive. Мёртвый туннель
-  переподнимается в фоне с backoff (1→30 с).
+  переподнимается в фоне с backoff (1→30 с, jitter; при полном простоя всех
+  туннелей cap 3 с). SSH keepalive (`keepalive_interval`, по умолчанию 15 с)
+  — вторичный: роняет соединение только после 4 **транспортных** ошибок
+  подряд (`0` = выкл.); отказ `keepalive@openssh.com` не считается.
 * TCP: SOCKS5-рукопожатие с Nekoray terminated на dupc, payload идёт
   прозрачной трубой до go-socks5-proxy; half-close (FIN) пробрасывается.
 * UDP: SOCKS5 UDP ASSOCIATE на dupc; датаграммы RFC1928 дублируются кадрами,
   на сервере уходят обычным UDP с IP сервера (минуя go-socks5-proxy) и
   возвращаются тем же путём.
+
+## Важно: Nekoray TUN / system-proxy
+
+Если Nekoray работает в режиме **TUN (весь трафик)** или system-proxy,
+**обязательно исключите SSH-endpoint сервера** (`ssh.address` / host из
+`ssh.addresses`, например `87.236.146.208`) из маршрутизации прокси
+(direct-route / bypass / исключение из TUN).
+
+Иначе получается петля:
+
+```
+ssh к серверу → TUN Nekoray → SOCKS5 dupc → SSH dial к серверу → TUN …
+```
+
+Симптомы: «рубится всё, даже по SSH не подключиться», массовые
+`tunnel dial failed`. dupc ловит такой случай и пишет
+`routing loop: tunnel endpoint reached via SOCKS5`.
 
 ## Сборка
 

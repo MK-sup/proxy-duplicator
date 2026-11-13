@@ -3,6 +3,7 @@ package transport
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -89,5 +90,39 @@ func TestDialSSHDialTimeout(t *testing.T) {
 	}
 	if _, err := DialSSH(t.Context(), cfg, "test#0"); err == nil {
 		t.Fatal("expected dial failure")
+	}
+}
+
+func TestKeepaliveTrackerRefuseIsNotFatal(t *testing.T) {
+	// !ok without err (REQUEST_FAILURE) must never tear down.
+	k := &keepaliveTracker{threshold: keepaliveFails}
+	for i := 0; i < 20; i++ {
+		if k.record(nil) {
+			t.Fatalf("refused keepalive counted as fatal at i=%d", i)
+		}
+	}
+	if k.fails != 0 {
+		t.Fatalf("fails=%d, want 0 after successes", k.fails)
+	}
+}
+
+func TestKeepaliveTrackerHardErrThreshold(t *testing.T) {
+	k := &keepaliveTracker{threshold: keepaliveFails}
+	err := errors.New("broken pipe")
+	for i := 0; i < keepaliveFails-1; i++ {
+		if k.record(err) {
+			t.Fatalf("premature teardown at fail %d/%d", i+1, keepaliveFails)
+		}
+	}
+	if !k.record(err) {
+		t.Fatalf("expected teardown at fail %d/%d", keepaliveFails, keepaliveFails)
+	}
+	// Success resets the counter.
+	k2 := &keepaliveTracker{threshold: keepaliveFails}
+	_ = k2.record(err)
+	_ = k2.record(err)
+	_ = k2.record(nil)
+	if k2.fails != 0 {
+		t.Fatalf("fails=%d after success, want 0", k2.fails)
 	}
 }

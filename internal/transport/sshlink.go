@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"sync"
@@ -24,6 +25,7 @@ type SSHDialConfig struct {
 	KeepaliveInterval time.Duration
 	ForwardHost       string // server-side, usually 127.0.0.1
 	ForwardPort       uint32 // server-side dupd listen port
+	Log               *slog.Logger
 }
 
 // directTCPPayload is the SSH direct-tcpip channel open payload (field order
@@ -99,7 +101,7 @@ func DialSSH(ctx context.Context, cfg SSHDialConfig, name string) (*Stream, erro
 	client := ssh.NewClient(cc, chans, reqs)
 
 	stopKA := make(chan struct{})
-	go keepaliveLoop(client, cfg.KeepaliveInterval, stopKA, func() {
+	go keepaliveLoop(client, cfg.KeepaliveInterval, stopKA, cfg.Log, func() {
 		_ = client.Close()
 		_ = tcp.Close()
 	})
@@ -162,30 +164,61 @@ func authMethods(cfg SSHDialConfig) ([]ssh.AuthMethod, error) {
 	return methods, nil
 }
 
-// keepaliveLoop issues keepalive@openssh.com requests; two consecutive
-// failures tear the connection down (the channel read then errors and the
-// replicator evicts the link). Exits on stop.
-func keepaliveLoop(client *ssh.Client, interval time.Duration, stop <-chan struct{}, onDead func()) {
+// keepaliveFails is how many consecutive transport errors (err != nil) it
+// takes to tear the connection down. A REQUEST_FAILURE (!ok) is NOT fatal —
+// some servers/middleboxes refuse the request while the link is healthy;
+// app-level PING/PONG is the primary liveness check.
+const keepaliveFails = 4
+
+// keepaliveTracker counts consecutive hard failures (transport errors only).
+type keepaliveTracker struct {
+	fails     int
+	threshold int
+}
+
+// record classifies one probe: err != nil is a hard fail (counts toward
+// teardown); a refused request (!ok without err) resets nothing and never
+// counts. Returns true when the connection should be torn down.
+func (k *keepaliveTracker) record(err error) bool {
+	if err != nil {
+		k.fails++
+		return k.fails >= k.threshold
+	}
+	k.fails = 0
+	return false
+}
+
+// keepaliveLoop issues keepalive@openssh.com requests; only real transport
+// errors count toward teardown (the channel read then errors and the
+// replicator evicts the link). Exits on stop. interval <= 0 disables it.
+func keepaliveLoop(client *ssh.Client, interval time.Duration, stop <-chan struct{}, log *slog.Logger, onDead func()) {
 	if interval <= 0 {
 		return
 	}
+	if log == nil {
+		log = slog.Default()
+	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
-	fails := 0
+	k := &keepaliveTracker{threshold: keepaliveFails}
 	for {
 		select {
 		case <-stop:
 			return
 		case <-t.C:
 			ok, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
-			if err != nil || !ok {
-				fails++
-				if fails >= 2 {
-					onDead()
-					return
-				}
-			} else {
-				fails = 0
+			if k.record(err) {
+				log.Warn("ssh keepalive failed — tearing down connection",
+					"fails", k.fails, "threshold", k.threshold, "err", err)
+				onDead()
+				return
+			}
+			if err != nil {
+				log.Warn("ssh keepalive error", "err", err, "fails", k.fails, "threshold", k.threshold)
+				continue
+			}
+			if !ok {
+				log.Debug("ssh keepalive refused by peer (ignored)")
 			}
 		}
 	}

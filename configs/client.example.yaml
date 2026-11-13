@@ -3,6 +3,12 @@
 # Run:  dup client -c client.yaml
 #
 # Point Nekoray's SOCKS5 outbound at socks5_listen.
+#
+# ⚠ Nekoray TUN / system-proxy mode: you MUST exclude the SSH endpoint
+#   (ssh.address / ssh.addresses hosts) from the proxy/TUN routing.
+#   Otherwise SSH-to-server is sucked into SOCKS5 → dupc → SSH dial → loop,
+#   and everything (including your own ssh session) dies. dupc logs
+#   "routing loop" if it sees this.
 mode: client
 
 # Number of parallel tunnels (duplication across all of them).
@@ -26,6 +32,8 @@ ssh:
   host_key: ""                  # pinned host key line (recommended! see README)
   forward_port: 9000            # server-side dupd `listen` port (direct-tcpip target)
   connect_timeout: 10s
+  # SSH-level keepalive (secondary; app PING/PONG is primary).
+  # 0 = disable. Only transport errors count toward teardown.
   keepalive_interval: 15s
 
 # Used only when transport: plain (test harness / no SSH).

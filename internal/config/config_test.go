@@ -135,6 +135,27 @@ relay_close_grace: 45
 	}
 }
 
+func TestKeepaliveInterval(t *testing.T) {
+	// Unset → default 15s.
+	cfg := loadYAML(t, "mode: client\nssh:\n  address: \"1.2.3.4:22\"\n  user: u\n  password: p\n")
+	if cfg.SSH.KeepaliveInterval == nil || cfg.SSH.KeepaliveInterval.D() != 15*time.Second {
+		t.Fatalf("default KeepaliveInterval = %v, want 15s", cfg.SSH.KeepaliveInterval)
+	}
+	// Explicit 0 → disabled (not replaced by default).
+	cfg = loadYAML(t, "mode: client\nssh:\n  address: \"1.2.3.4:22\"\n  user: u\n  password: p\n  keepalive_interval: 0\n")
+	if cfg.SSH.KeepaliveInterval == nil {
+		t.Fatal("KeepaliveInterval must not be nil when explicitly set")
+	}
+	if cfg.SSH.KeepaliveInterval.D() != 0 {
+		t.Fatalf("KeepaliveInterval = %v, want 0 (disabled)", cfg.SSH.KeepaliveInterval.D())
+	}
+	// Explicit nonzero is kept.
+	cfg = loadYAML(t, "mode: client\nssh:\n  address: \"1.2.3.4:22\"\n  user: u\n  password: p\n  keepalive_interval: 30s\n")
+	if cfg.SSH.KeepaliveInterval.D() != 30*time.Second {
+		t.Fatalf("KeepaliveInterval = %v, want 30s", cfg.SSH.KeepaliveInterval.D())
+	}
+}
+
 func TestExampleConfigs(t *testing.T) {
 	for _, tc := range []struct {
 		file, mode string

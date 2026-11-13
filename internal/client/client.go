@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -102,38 +105,67 @@ func Run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 func (c *Client) tunnelLoop(ctx context.Context, slot int) {
 	defer c.wg.Done()
 	endpoints := c.endpointFor(slot)
-	backoff := c.cfg.Reconnect.Initial.D()
+	initial := c.cfg.Reconnect.Initial.D()
 	maxBackoff := c.cfg.Reconnect.Max.D()
+	const allDownCap = 3 * time.Second
+	const stableAfter = 10 * time.Second
 
+	backoff := initial
 	for ctx.Err() == nil {
+		// All tunnels down: recover fast — long backoff here means a
+		// full outage window for the user.
+		if c.rep.UpCount() == 0 && backoff > allDownCap {
+			backoff = allDownCap
+		}
+
 		stream, err := c.dialTunnel(ctx, slot, endpoints)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			c.log.Warn("tunnel dial failed", "slot", slot, "endpoint", endpoints, "err", err, "retry_in", backoff)
-			if !sleep(ctx, backoff) {
+			// Jitter so N slots don't hammer sshd in lockstep.
+			wait := jitter(backoff)
+			c.log.Warn("tunnel dial failed", "slot", slot, "endpoint", endpoints, "err", err, "retry_in", wait)
+			if !sleep(ctx, wait) {
 				return
 			}
 			backoff = minDur(backoff*2, maxBackoff)
 			continue
 		}
-		backoff = c.cfg.Reconnect.Initial.D()
 
+		connectedAt := time.Now()
 		gen := c.rep.SetLink(slot, stream)
 		go c.rep.ReadLoop(slot, stream, gen, c.onFrame)
 
 		// Wait until this generation drops (poll + context).
+		dropped := false
 		for ctx.Err() == nil {
 			if !sleep(ctx, 300*time.Millisecond) {
 				_ = stream.Close()
 				return
 			}
 			if c.rep.State(slot) != transport.LinkUp {
+				dropped = true
 				break
 			}
 		}
+		if dropped && time.Since(connectedAt) >= stableAfter {
+			// Link was healthy long enough — full reset.
+			backoff = initial
+		} else if dropped {
+			// Short-lived link (flap): keep growing backoff.
+			backoff = minDur(max(backoff, initial)*2, maxBackoff)
+		}
 	}
+}
+
+// jitter spreads d over [d/2, d) so parallel slots desynchronize.
+func jitter(d time.Duration) time.Duration {
+	if d <= 1 {
+		return d
+	}
+	half := d / 2
+	return half + time.Duration(rand.Int63n(int64(half)+1))
 }
 
 func (c *Client) endpointFor(slot int) []string {
@@ -169,6 +201,7 @@ func (c *Client) dialTunnel(ctx context.Context, slot int, endpoints []string) (
 			KeepaliveInterval: c.cfg.SSH.KeepaliveInterval.D(),
 			ForwardHost:       "127.0.0.1",
 			ForwardPort:       uint32(c.cfg.SSH.ForwardPort),
+			Log:               c.log,
 		}, name)
 	default:
 		return transport.DialPlain(ctx, addr, name, c.cfg.SSH.ConnectTimeout.D())
@@ -182,6 +215,39 @@ func expandHome(p string) string {
 		}
 	}
 	return p
+}
+
+// isOwnEndpoint reports whether target is one of the tunnel endpoints this
+// client dials (SSH or plain). Hitting one through SOCKS5 means a proxy/TUN
+// loop.
+func (c *Client) isOwnEndpoint(target protocol.Addr) bool {
+	var eps []string
+	if c.cfg.Transport == config.TransportSSH {
+		eps = c.cfg.SSH.Endpoints()
+	} else {
+		eps = c.cfg.Plain.Endpoints()
+	}
+	for _, ep := range eps {
+		host, portStr, err := net.SplitHostPort(ep)
+		if err != nil {
+			continue
+		}
+		port, err := strconv.ParseUint(portStr, 10, 16)
+		if err != nil {
+			continue
+		}
+		if uint16(port) != target.Port {
+			continue
+		}
+		// Compare hosts: exact, or IP-to-IP (target may be domain form).
+		if strings.EqualFold(host, target.Host) {
+			return true
+		}
+		if ip1, ip2 := net.ParseIP(host), net.ParseIP(target.Host); ip1 != nil && ip2 != nil && ip1.Equal(ip2) {
+			return true
+		}
+	}
+	return false
 }
 
 // onFrame routes sequenced frames from either tunnel into the session.
@@ -250,6 +316,17 @@ func (c *Client) handleSocks(conn net.Conn) {
 // handleConnect allocates a session, sends OPEN, waits for OPEN_ACK, then
 // relays raw bytes until either side closes.
 func (c *Client) handleConnect(conn net.Conn, br *bufio.Reader, target protocol.Addr) {
+	// Routing-loop guard: with Nekoray TUN / system-wide proxy the SSH
+	// endpoint itself may be sucked into SOCKS5 → dial → TUN → SOCKS5…
+	if c.isOwnEndpoint(target) {
+		c.log.Warn("routing loop: tunnel endpoint reached via SOCKS5 — "+
+			"exclude it from Nekoray TUN/proxy",
+			"target", target, "transport", c.cfg.Transport)
+		_ = socks.WriteReply(conn, socks.RepHostUnreach)
+		_ = conn.Close()
+		return
+	}
+
 	p := relay.NewTCP(conn, c.rep.Send, c.cfg.RelayCloseGrace.D(), c.log)
 
 	sess, err := c.tab.Alloc(session.KindTCP, target.String(), p, session.Hooks{

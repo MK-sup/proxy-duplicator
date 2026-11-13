@@ -78,9 +78,11 @@ type SSHConfig struct {
 	HostKey           string   `yaml:"host_key"`
 	// ForwardPort is the server-side dupd listen port reached via direct-tcpip
 	// (127.0.0.1:<port> on the server; must match the server's `listen` port).
-	ForwardPort       uint16   `yaml:"forward_port"`
-	ConnectTimeout    Duration `yaml:"connect_timeout"`
-	KeepaliveInterval Duration `yaml:"keepalive_interval"`
+	ForwardPort    uint16 `yaml:"forward_port"`
+	ConnectTimeout Duration `yaml:"connect_timeout"`
+	// KeepaliveInterval is a *Duration so YAML `keepalive_interval: 0`
+	// explicitly disables SSH keepalive (nil = unset → default 15s).
+	KeepaliveInterval *Duration `yaml:"keepalive_interval"`
 }
 
 // Endpoints returns the SSH endpoint list (addresses wins over address when set).
@@ -215,7 +217,10 @@ func (c *Config) applyDefaults() {
 	setDur(&c.Reconnect.Max, 30*time.Second)
 	setDur(&c.BothDeadCloseAfter, 10*time.Second)
 	setDur(&c.SSH.ConnectTimeout, 10*time.Second)
-	setDur(&c.SSH.KeepaliveInterval, 15*time.Second)
+	if c.SSH.KeepaliveInterval == nil {
+		ka := Duration(15 * time.Second)
+		c.SSH.KeepaliveInterval = &ka
+	}
 	if c.SSH.ForwardPort == 0 {
 		// Derive from the server-side default listen port (127.0.0.1:9000).
 		if _, port, err := net.SplitHostPort(c.Listen); err == nil {

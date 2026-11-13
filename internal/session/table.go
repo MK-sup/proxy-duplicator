@@ -302,7 +302,7 @@ func (t *Table) GC(now time.Time) int {
 	t.mu.Unlock()
 
 	for _, v := range kill {
-		t.logger().Info("session idle-GC", "id", v.s.ID, "kind", v.s.Kind, "target", v.s.Target)
+		t.logger().Debug("session idle-GC", "id", v.s.ID, "kind", v.s.Kind, "target", v.s.Target)
 		v.s.Close(v.why)
 	}
 	return len(kill)
