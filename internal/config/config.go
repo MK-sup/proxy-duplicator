@@ -128,6 +128,10 @@ type Config struct {
 	Listen           string   `yaml:"listen"`
 	SOCKS5Upstream   string   `yaml:"socks5_upstream"`
 	SOCKS5DialTimeout Duration `yaml:"socks5_dial_timeout"`
+	// SOCKS5User / SOCKS5Password are credentials for the upstream
+	// go-socks5-proxy when it is started with -user/-password (RFC 1929).
+	SOCKS5User     string `yaml:"socks5_user"`
+	SOCKS5Password string `yaml:"socks5_password"`
 
 	// client
 	SSH                SSHConfig      `yaml:"ssh"`
@@ -268,6 +272,9 @@ func (c *Config) Validate(mode string) error {
 		}
 		if err := checkHostPort(c.SOCKS5Upstream, false); err != nil {
 			return fmt.Errorf("socks5_upstream: %w", err)
+		}
+		if c.SOCKS5Password != "" && c.SOCKS5User == "" {
+			return fmt.Errorf("socks5_password is set but socks5_user is empty")
 		}
 		return nil
 	}

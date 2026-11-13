@@ -199,9 +199,13 @@ func (s *Server) handleOpen(f *protocol.Frame) {
 // connectUpstream completes the SOCKS5 handshake with go-socks5-proxy, echoes
 // the raw reply as OPEN_ACK (seq 0), then starts the relay on success.
 func (s *Server) connectUpstream(sess *session.Session, p *relay.TCP, target protocol.Addr) {
-	conn, reply, err := socks.DialUpstream(context.Background(), s.cfg.SOCKS5Upstream, target, s.cfg.SOCKS5DialTimeout.D())
+	conn, reply, err := socks.DialUpstream(context.Background(), s.cfg.SOCKS5Upstream, target,
+		s.cfg.SOCKS5DialTimeout.D(), s.cfg.SOCKS5User, s.cfg.SOCKS5Password)
 	if err != nil {
 		s.log.Warn("upstream dial failed", "session", sess.ID, "target", target, "err", err)
+		// Still send a failure OPEN_ACK so the client gets an immediate
+		// SOCKS5 reply instead of waiting out WaitAck (10s).
+		s.sendFailAck(sess, socks.RepGeneralFail)
 		s.tab.Destroy(sess.ID, "upstream dial: "+err.Error())
 		return
 	}
@@ -228,6 +232,16 @@ func (s *Server) connectUpstream(sess *session.Session, p *relay.TCP, target pro
 	}
 	p.BindLocal(conn)
 	p.Start()
+}
+
+// sendFailAck delivers an OPEN_ACK carrying a synthetic SOCKS5 failure reply.
+// Best-effort: if Send fails the session is destroyed by the caller anyway.
+func (s *Server) sendFailAck(sess *session.Session, rep byte) {
+	ack, err := protocol.NewFrame(protocol.TypeOpenAck, sess.ID, sess.NextSeq(), socks.FailureReply(rep))
+	if err != nil {
+		return
+	}
+	_ = s.rep.Send(ack)
 }
 
 // bufferPending parks frames that arrived for a session whose OPEN has not

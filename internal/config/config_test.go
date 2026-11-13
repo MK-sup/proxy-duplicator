@@ -156,6 +156,27 @@ func TestKeepaliveInterval(t *testing.T) {
 	}
 }
 
+func TestServerSOCKS5AuthConfig(t *testing.T) {
+	// password without user → error
+	cfg := loadYAML(t, "mode: server\nsocks5_password: secret\n")
+	if err := cfg.Validate(ModeServer); err == nil {
+		t.Fatal("expected error when socks5_password set without socks5_user")
+	}
+	// both set → ok
+	cfg = loadYAML(t, "mode: server\nsocks5_user: alice\nsocks5_password: secret\n")
+	if err := cfg.Validate(ModeServer); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if cfg.SOCKS5User != "alice" || cfg.SOCKS5Password != "secret" {
+		t.Fatalf("got user=%q pass=%q", cfg.SOCKS5User, cfg.SOCKS5Password)
+	}
+	// user only (empty password) → ok
+	cfg = loadYAML(t, "mode: server\nsocks5_user: alice\n")
+	if err := cfg.Validate(ModeServer); err != nil {
+		t.Fatalf("Validate user-only: %v", err)
+	}
+}
+
 func TestExampleConfigs(t *testing.T) {
 	for _, tc := range []struct {
 		file, mode string

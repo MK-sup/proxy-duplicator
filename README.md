@@ -94,6 +94,7 @@ go build -trimpath -ldflags "-s -w -X main.version=v0.1.0" -o dist\dup-linux-arm
 |------|-------|
 | `listen: "127.0.0.1:9000"` | куда sshd форвардит direct-tcpip (только loopback!) |
 | `socks5_upstream` | локальный go-socks5-proxy для TCP |
+| `socks5_user` / `socks5_password` | логин/пароль upstream, если go-socks5-proxy запущен с `-user/-password` (RFC 1929) |
 | `ping_interval` / `ping_timeout` | детект зависших туннелей |
 
 dupd принимает до 8 одновременных туннелей и не знает о числе туннелей

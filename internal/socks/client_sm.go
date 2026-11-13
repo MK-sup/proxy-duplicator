@@ -19,6 +19,7 @@ const (
 	CmdUDPAssoc = 0x03
 
 	AuthNone     = 0x00
+	AuthUserPass = 0x02 // RFC 1929
 	AuthNoAccept = 0xFF
 
 	RepSuccess     = 0x00

@@ -14,6 +14,10 @@ listen: "127.0.0.1:9000"
 # Local serjs/go-socks5-proxy for TCP egress (UDP bypasses it).
 socks5_upstream: "127.0.0.1:1080"
 socks5_dial_timeout: 10s
+# If go-socks5-proxy is started with -user/-password, set the same
+# credentials here (RFC 1929 username/password auth).
+socks5_user: ""
+socks5_password: ""
 
 log:
   level: info        # debug | info | warn | error

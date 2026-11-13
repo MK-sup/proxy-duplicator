@@ -158,7 +158,7 @@ func (f *fixtureUpstream) Targets() []string {
 func TestDialUpstreamSuccess(t *testing.T) {
 	f := startFixture(t, RepSuccess, false)
 	conn, reply, err := DialUpstream(context.Background(), f.ln.Addr().String(),
-		protocol.Addr{Host: "198.51.100.9", Port: 8443, ATYP: protocol.ATYPIPv4}, 5*time.Second)
+		protocol.Addr{Host: "198.51.100.9", Port: 8443, ATYP: protocol.ATYPIPv4}, 5*time.Second, "", "")
 	if err != nil {
 		t.Fatalf("DialUpstream: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestDialUpstreamSuccess(t *testing.T) {
 func TestDialUpstreamRefused(t *testing.T) {
 	f := startFixture(t, RepHostUnreach, false)
 	conn, reply, err := DialUpstream(context.Background(), f.ln.Addr().String(),
-		protocol.Addr{Host: "example.com", Port: 80, ATYP: protocol.ATYPDomain}, 5*time.Second)
+		protocol.Addr{Host: "example.com", Port: 80, ATYP: protocol.ATYPDomain}, 5*time.Second, "", "")
 	if err != nil {
 		t.Fatalf("DialUpstream: %v", err)
 	}
@@ -194,9 +194,150 @@ func TestDialUpstreamRefused(t *testing.T) {
 func TestDialUpstreamBadTarget(t *testing.T) {
 	f := startFixture(t, RepSuccess, false)
 	_, _, err := DialUpstream(context.Background(), "127.0.0.1:1" /* closed port */,
-		protocol.Addr{Host: "example.com", Port: 80}, 500*time.Millisecond)
+		protocol.Addr{Host: "example.com", Port: 80}, 500*time.Millisecond, "", "")
 	if err == nil {
 		t.Fatal("expected dial error")
 	}
 	_ = f
+}
+
+// --- RFC 1929 auth fixture (go-socks5-proxy -user/-password stand-in) ---
+
+type authFixture struct {
+	ln       net.Listener
+	user, pass string
+}
+
+// startAuthFixture accepts only method 0x02 and validates credentials.
+// If requireMethod00 is false it also accepts no-auth (for offer tests).
+func startAuthFixture(t *testing.T, user, pass string) *authFixture {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &authFixture{ln: ln, user: user, pass: pass}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go f.handle(conn)
+		}
+	}()
+	t.Cleanup(func() { ln.Close() })
+	return f
+}
+
+func (f *authFixture) handle(conn net.Conn) {
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+	var hdr [2]byte
+	if _, err := io.ReadFull(br, hdr[:]); err != nil {
+		return
+	}
+	methods := make([]byte, hdr[1])
+	if _, err := io.ReadFull(br, methods); err != nil {
+		return
+	}
+	// Require user/pass method to be offered and select it.
+	hasUP := false
+	for _, m := range methods {
+		if m == AuthUserPass {
+			hasUP = true
+		}
+	}
+	if !hasUP {
+		conn.Write([]byte{Version, AuthNoAccept})
+		return
+	}
+	conn.Write([]byte{Version, AuthUserPass})
+	// RFC 1929 subnegotiation
+	var uh [2]byte
+	if _, err := io.ReadFull(br, uh[:]); err != nil || uh[0] != 0x01 {
+		return
+	}
+	u := make([]byte, uh[1])
+	if _, err := io.ReadFull(br, u); err != nil {
+		return
+	}
+	var plen [1]byte
+	if _, err := io.ReadFull(br, plen[:]); err != nil {
+		return
+	}
+	p := make([]byte, plen[0])
+	if _, err := io.ReadFull(br, p); err != nil {
+		return
+	}
+	if string(u) != f.user || string(p) != f.pass {
+		conn.Write([]byte{0x01, 0x01}) // status: not allowed
+		return
+	}
+	conn.Write([]byte{0x01, 0x00}) // success
+	// CONNECT
+	req, err := ReadRequest(br)
+	if err != nil {
+		return
+	}
+	_ = req
+	conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	io.Copy(io.Discard, conn)
+}
+
+func TestDialUpstreamUserPassSuccess(t *testing.T) {
+	f := startAuthFixture(t, "alice", "s3cret")
+	conn, reply, err := DialUpstream(context.Background(), f.ln.Addr().String(),
+		protocol.Addr{Host: "198.51.100.9", Port: 443, ATYP: protocol.ATYPIPv4},
+		5*time.Second, "alice", "s3cret")
+	if err != nil {
+		t.Fatalf("DialUpstream: %v", err)
+	}
+	defer conn.Close()
+	rep, err := ReplyRep(reply)
+	if err != nil || rep != RepSuccess {
+		t.Fatalf("reply rep=%d err=%v", rep, err)
+	}
+}
+
+func TestDialUpstreamUserPassWrongPassword(t *testing.T) {
+	f := startAuthFixture(t, "alice", "s3cret")
+	_, _, err := DialUpstream(context.Background(), f.ln.Addr().String(),
+		protocol.Addr{Host: "198.51.100.9", Port: 443, ATYP: protocol.ATYPIPv4},
+		5*time.Second, "alice", "wrong")
+	if err == nil {
+		t.Fatal("expected auth rejection")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("socks5_user/socks5_password")) {
+		t.Errorf("error should hint at config keys: %v", err)
+	}
+}
+
+func TestDialUpstreamNoCredsAgainstAuthProxy(t *testing.T) {
+	f := startAuthFixture(t, "alice", "s3cret")
+	_, _, err := DialUpstream(context.Background(), f.ln.Addr().String(),
+		protocol.Addr{Host: "198.51.100.9", Port: 443, ATYP: protocol.ATYPIPv4},
+		5*time.Second, "", "")
+	if err == nil {
+		t.Fatal("expected 0xff refusal")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("socks5_user/socks5_password")) {
+		t.Errorf("error should hint at config keys: %v", err)
+	}
+}
+
+func TestDialUpstreamCredsAgainstNoAuthProxy(t *testing.T) {
+	// no-auth fixture ignores credentials and still works when we offer both.
+	f := startFixture(t, RepSuccess, false)
+	conn, reply, err := DialUpstream(context.Background(), f.ln.Addr().String(),
+		protocol.Addr{Host: "198.51.100.9", Port: 443, ATYP: protocol.ATYPIPv4},
+		5*time.Second, "alice", "s3cret")
+	if err != nil {
+		t.Fatalf("DialUpstream: %v", err)
+	}
+	defer conn.Close()
+	rep, err := ReplyRep(reply)
+	if err != nil || rep != RepSuccess {
+		t.Fatalf("reply rep=%d err=%v", rep, err)
+	}
 }
